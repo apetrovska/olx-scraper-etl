@@ -293,9 +293,5 @@ def transform_data(raw_data: list) -> pd.DataFrame:
 
     df = pd.DataFrame(cleaned_data)
 
-    # Drop rows where price could not be found
-    # Safe drop: check that DataFrame is not empty and the column exists
-    if not df.empty and 'Price' in df.columns:
-        df = df.dropna(subset=['Price'])
     logger.info("Transformation complete. Rows ready: %d", len(df))
     return df

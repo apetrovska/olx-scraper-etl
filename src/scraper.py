@@ -91,7 +91,7 @@ async def fetch_catalog_page(context: BrowserContext, page_num: int, semaphore: 
                 if href and href not in links:
                     links.append(href)
 
-            logger.info("Parsed %d links from page %d.", len(links), page_num)
+            logger.debug("Parsed %d links from page %d.", len(links), page_num)
             return links
 
         except Exception as e:
@@ -146,7 +146,7 @@ async def process_single_ad(context: BrowserContext, link: str, semaphore: async
         page = await context.new_page()
         try:
             ad_id = link.split('-')[-1].replace('.html', '')
-            logger.info("Parsing adv: %s", ad_id)
+            logger.debug("Parsing adv: %s", ad_id)
 
             await page.goto(link, wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT)
             await asyncio.sleep(random.uniform(1, 3))
@@ -262,7 +262,7 @@ async def extract_data() -> list:
         links = list(dict.fromkeys(all_links))
         duplicates = len(all_links) - len(links)
         logger.debug("Total parsed: %d links, duplicates skipped: %d", len(all_links), duplicates)
-        logger.info("Found %d unique links. Launching %d parallel threads...", len(links), MAX_CONCURRENT_TABS)
+        logger.info("Found %d unique links. Launching %d parallel threads... Parsing in progress", len(links), MAX_CONCURRENT_TABS)
 
         # Process all ads in parallel
         ad_semaphore = asyncio.Semaphore(MAX_CONCURRENT_TABS)
