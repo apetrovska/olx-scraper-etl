@@ -1,33 +1,37 @@
 import asyncio
-from scraper import extract_data
-from transformer import transform_data
-from loader import load_to_sheets
+import logging
+
+from src.utils.logger import setup_logging
+from src.scraper import extract_data
+from src.transformer import transform_data
+from src.loader import load_to_sheets
+
+logger = logging.getLogger(__name__)
+
 
 async def main_pipeline():
-    print("=== Старт ETL процесу ===")
+    logger.info("=== ETL pipeline started ===")
 
     # 1. EXTRACT
     raw_data = await extract_data()
 
-    # ДЕБАГ РЯДОК:
-    print(f"DEBUG: Перше сире оголошення: {raw_data[0] if raw_data else 'Пусто'}")
+    logger.debug("First raw adv: %s", raw_data[0] if raw_data else "Empty")
 
     if not raw_data:
-        print("Не вдалося зібрати дані")
+        logger.warning("No data collected")
         return
 
     # 2. TRANSFORM
     clean_df = transform_data(raw_data)
 
-    # Виводимо результат
-    print("Фінальний DataFrame перед відправкою:")
-    print(clean_df.head())
+    logger.debug("Final DataFrame before loading:\n%s", clean_df.head().to_string())
 
     # 3. LOAD
     load_to_sheets(clean_df)
 
-    print("ETL процес успішно завершено!")
+    logger.info("ETL pipeline completed successfully")
 
 
 if __name__ == "__main__":
+    setup_logging()
     asyncio.run(main_pipeline())
