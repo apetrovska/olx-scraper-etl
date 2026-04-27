@@ -82,7 +82,7 @@ def extract_fallback_data(item: dict) -> dict:
     missing values in-place.
 
     Args:
-        item (dict): Raw ad dictionary from :func:`scraper.process_single_ad`.
+        item (dict): Raw ad dictionary from :func:`scraper.process_single_ad_sync`.
             Expected keys: ``"raw_price"``, ``"raw_location"``, ``"title"``,
             ``"full_text"``.
 
