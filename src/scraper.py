@@ -1,6 +1,9 @@
 import asyncio
 import logging
 import random
+from concurrent.futures import ThreadPoolExecutor
+import requests
+from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright, BrowserContext
 from src.settings import (
     URL, MAX_CONCURRENT_TABS, MAX_CONCURRENT_CATALOG_PAGES, ADS_PER_PAGE,
@@ -102,99 +105,73 @@ async def fetch_catalog_page(context: BrowserContext, page_num: int, semaphore: 
             await page.close()
 
 
-async def process_single_ad(context: BrowserContext, link: str, semaphore: asyncio.Semaphore):
-    """Scrapes a single ad page and returns structured raw data.
+def process_single_ad_sync(link: str) -> dict | None:
+    """Scrapes a single ad page using requests + BeautifulSoup.
 
-    Opens a new browser tab, navigates to the ad URL, and extracts: title,
-    price, location, and full page text. Location is extracted using a
-    structural CSS anchor (``img[alt="Location"] + div p``); if the first
-    paragraph contains digits (street address), the second paragraph (region)
-    is used instead. The tab is always closed in the ``finally`` block.
+    Fetches the ad page via HTTP request and parses with BeautifulSoup.
+    Extracts: title, price, location, and full page text. Location is extracted
+    using CSS selector for the location anchor; if the first paragraph contains
+    digits, uses the second paragraph instead.
 
     Args:
-        context (BrowserContext): Shared Playwright browser context used to
-            open new tabs.
         link (str): Absolute URL of the ad page to scrape.
-        semaphore (asyncio.Semaphore): Limits the number of ad pages open at
-            the same time to avoid Cloudflare/OLX rate-limiting.
 
     Returns:
         dict | None: Dictionary with raw scraped fields, or ``None`` if a
-            critical error occurred::
-
-                {
-                    "id":           "123456789",          # ad ID from URL
-                    "title":        "2-кімнатна квартира",
-                    "raw_price":    "35 000 $",           # unparsed price string
-                    "raw_location": "Київ, Дарницький",   # unparsed location string
-                    "url":          "https://www.olx.ua/...",
-                    "full_text":    "..."                 # full body text for fallback
-                }
-
-    Example:
-        Input:  link="https://www.olx.ua/uk/.../prodazh-2k-kvartiry-ID123.html"
-        Output: {
-                    "id": "ID123",
-                    "title": "2-кімнатна квартира, 65 м²",
-                    "raw_price": "65 000 $",
-                    "raw_location": "Київ, Голосіївський",
-                    "url": "https://www.olx.ua/uk/.../prodazh-2k-kvartiry-ID123.html",
-                    "full_text": "2-кімнатна квартира..."
-                }
+            critical error occurred.
     """
-    async with semaphore:
-        page = await context.new_page()
-        try:
-            ad_id = link.split('-')[-1].replace('.html', '')
-            logger.debug("Parsing adv: %s", ad_id)
+    try:
+        ad_id = link.split('-')[-1].replace('.html', '')
+        logger.debug("Parsing adv: %s", ad_id)
 
-            await page.goto(link, wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT)
-            await asyncio.sleep(random.uniform(1, 3))
+        headers = {"User-Agent": USER_AGENT}
+        response = requests.get(link, headers=headers, timeout=PAGE_LOAD_TIMEOUT / 1000)
+        response.raise_for_status()
 
-            try:
-                raw_page_title = await page.title()
-                title = raw_page_title.split(' - ')[0].strip()
-            except Exception:
-                title = "Not found"
+        soup = BeautifulSoup(response.content, 'html.parser')
 
-            try:
-                raw_price = await page.locator('[data-testid="ad-price-container"] h3').first.inner_text(timeout=ELEMENT_TIMEOUT)
-            except Exception:
-                raw_price = None
+        # Extract title from <title> tag
+        title = "Not found"
+        title_tag = soup.find('title')
+        if title_tag:
+            title = title_tag.get_text().split(' - ')[0].strip()
 
-            try:
-                # Anchor: img[alt="Location"], next to which there is always a div with two <p>:
-                # p.nth(0) — city/district, p.nth(1) — region
-                loc_ps = page.locator('img[alt="Location"] + div p')
-                city_text = await loc_ps.nth(0).inner_text(timeout=ELEMENT_TIMEOUT)
-                if any(ch.isdigit() for ch in city_text):
-                    # p.nth(0) contains a street address with a number — use region from p.nth(1)
-                    raw_location = await loc_ps.nth(1).inner_text(timeout=ELEMENT_TIMEOUT)
-                else:
-                    raw_location = city_text
-            except Exception:
-                raw_location = "Unknown"
+        # Extract price from [data-testid="ad-price-container"] h3
+        raw_price = None
+        price_elem = soup.select_one('[data-testid="ad-price-container"] h3')
+        if price_elem:
+            raw_price = price_elem.get_text().strip()
 
-            try:
-                full_page_text = await page.locator('body').inner_text(timeout=ELEMENT_TIMEOUT)
-            except Exception:
-                full_page_text = ""
+        # Extract location from img[alt="Location"] + div p
+        raw_location = "Unknown"
+        img = soup.find('img', alt='Location')
+        if img:
+            parent = img.find_next('div')
+            if parent:
+                ps = parent.find_all('p')
+                if ps:
+                    city_text = ps[0].get_text().strip()
+                    if any(ch.isdigit() for ch in city_text) and len(ps) > 1:
+                        raw_location = ps[1].get_text().strip()
+                    else:
+                        raw_location = city_text
 
-            return {
-                "id": ad_id,
-                "title": title,
-                "raw_price": raw_price,
-                "raw_location": raw_location,
-                "url": link,
-                "full_text": full_page_text
-            }
+        # Extract full body text
+        body = soup.find('body')
+        full_page_text = body.get_text() if body else ""
 
-        except Exception as e:
-            logger.error("Critical error on page %s: %s", link, e)
-            return None
+        return {
+            "id": ad_id,
+            "title": title,
+            "raw_price": raw_price,
+            "raw_location": raw_location,
+            "url": link,
+            "full_text": full_page_text
+        }
 
-        finally:
-            await page.close()
+    except Exception as e:
+        logger.error("Critical error on page %s: %s", link, e)
+        return None
 
 
 async def extract_data() -> list:
@@ -209,7 +186,7 @@ async def extract_data() -> list:
 
     Returns:
         list[dict]: List of raw ad dictionaries. Each item has the shape
-            returned by :func:`process_single_ad`. Failed ads are excluded::
+            returned by :func:`process_single_ad_sync`. Failed ads are excluded::
 
                 [
                     {
@@ -264,10 +241,11 @@ async def extract_data() -> list:
         logger.debug("Total parsed: %d links, duplicates skipped: %d", len(all_links), duplicates)
         logger.info("Found %d unique links. Launching %d parallel threads... Parsing in progress", len(links), MAX_CONCURRENT_TABS)
 
-        # Process all ads in parallel
-        ad_semaphore = asyncio.Semaphore(MAX_CONCURRENT_TABS)
-        tasks = [process_single_ad(context, link, ad_semaphore) for link in links]
-        results = await asyncio.gather(*tasks)
+        # Process all ads in parallel using ThreadPoolExecutor
+        loop = asyncio.get_event_loop()
+        with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_TABS) as executor:
+            futures = [loop.run_in_executor(executor, process_single_ad_sync, link) for link in links]
+            results = await asyncio.gather(*futures)
 
         await browser.close()
 

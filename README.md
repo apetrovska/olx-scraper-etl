@@ -6,10 +6,10 @@ An asynchronous ETL pipeline that scrapes, cleans, and loads real estate listing
 ## Tech Stack
 | Layer | Tool | Purpose |
 |---|---|---|
-| **Extract** | `Playwright` | Async browser automation, user-behaviour simulation |
+| **Extract** | `Playwright` (catalog), `requests` + `BeautifulSoup` (ads) | Hybrid approach: browser automation for dynamic catalog, lightweight HTTP parsing for individual listings |
 | **Transform** | `Pandas`, `re` | Data cleaning, regex parsing, missing value handling |
 | **Load** | `gspread`, Google Sheets API | Automated cloud upload |
-| **Concurrency** | `asyncio` | Parallel processing with load control |
+| **Concurrency** | `asyncio` + `ThreadPoolExecutor` | Parallel catalog fetches (async), parallel ad fetches (thread pool) with load control |
 | **Runtime** | Python 3.11+ | |
 
 ## Project Structure
@@ -19,7 +19,7 @@ olx_scraper_etl/
 ├── requirements.txt
 ├── service_account_creds.json   # Google service account key (git-ignored)
 └── src/
-    ├── scraper.py           # Extract phase: browser automation, link collection
+    ├── scraper.py           # Extract phase: Playwright for catalog, requests+BeautifulSoup for ads
     ├── transformer.py       # Transform phase: cleaning, parsing, fallback logic
     ├── loader.py            # Load phase: Google Sheets upload
     ├── settings.py          # All configurable constants
@@ -29,17 +29,31 @@ olx_scraper_etl/
 
 ## Implementation Details
 
-### 1. Concurrency Control
-Async data collection via `asyncio.gather` with two independent semaphores:
-- `MAX_CONCURRENT_CATALOG_PAGES` — limits parallel catalog page fetches
-- `MAX_CONCURRENT_TABS` — limits parallel ad page fetches
+### 1. Hybrid Scraping Architecture
+**Catalog pages (Playwright):**
+- Launched once to discover ad links
+- Requires JavaScript execution (dynamic pagination)
+- Limited by `MAX_CONCURRENT_CATALOG_PAGES` semaphore
+
+**Individual ads (requests + BeautifulSoup):**
+- Lightweight HTTP requests instead of opening browser tabs
+- No JavaScript execution, CSS rendering, or image/font loading
+- BeautifulSoup parses HTML directly
+- Parallelized via `ThreadPoolExecutor` (up to `MAX_CONCURRENT_TABS` workers)
+
+**Result:** Lower memory/CPU usage, faster processing, and better resilience to browser crashes.
+
+### 2. Concurrency Control
+Hybrid approach with two independent concurrency mechanisms:
+- **Catalog fetches:** `asyncio.Semaphore(MAX_CONCURRENT_CATALOG_PAGES)` — controls parallel Playwright tabs
+- **Ad fetches:** `ThreadPoolExecutor(max_workers=MAX_CONCURRENT_TABS)` — controls parallel HTTP requests
 
 This throttles request rate to avoid Cloudflare HTTP 429 blocks while maintaining high throughput. Both limits can be scaled up when a Proxy Pool is added.
 
-### 2. Graceful Degradation & Fallback
+### 3. Graceful Degradation & Fallback
 If primary CSS/testid selectors fail to extract a field, a text-mining fallback activates: the full page body text is stored during scraping, and `transformer.py` uses regex patterns to recover price, area, floor, and location. Handles A/B design tests and dynamic CSS class names.
 
-### 3. Data Quality & Schema
+### 4. Data Quality & Schema
 - Prices stripped and cast to `float`
 - Currency extracted and stored in a separate column (UAH / USD / EUR)
 - Location parsed to city name only (street addresses filtered out)
