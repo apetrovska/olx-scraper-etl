@@ -31,8 +31,7 @@ olx_scraper_etl/
 
 ### 1. Hybrid Scraping Architecture
 **Catalog pages (Playwright):**
-- Launched once to discover ad links
-- Requires JavaScript execution (dynamic pagination)
+- Launched once to gather ad links
 - Limited by `MAX_CONCURRENT_CATALOG_PAGES` semaphore
 
 **Individual ads (requests + BeautifulSoup):**
