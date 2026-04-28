@@ -36,11 +36,10 @@ olx_scraper_etl/
 
 **Individual ads (requests + BeautifulSoup):**
 - Lightweight HTTP requests instead of opening browser tabs
-- No JavaScript execution, CSS rendering, or image/font loading
-- BeautifulSoup parses HTML directly
-- Parallelized via `ThreadPoolExecutor` (up to `MAX_CONCURRENT_TABS` workers)
+- No JavaScript execution, static HTML pages - BeautifulSoup used to parse HTML directly
+- Concurrency implemented via `ThreadPoolExecutor` (up to `MAX_CONCURRENT_TABS` workers)
 
-**Result:** Lower memory/CPU usage, faster processing, and better resilience to browser crashes.
+**Result:** Lower memory/CPU usage, faster processing, and improved resilience to browser crashes.
 
 ### 2. Concurrency Control
 Hybrid approach with two independent concurrency mechanisms:
