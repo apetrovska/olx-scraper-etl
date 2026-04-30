@@ -73,6 +73,10 @@ async def fetch_catalog_page(context: BrowserContext, page_num: int, semaphore: 
                   ...  # up to 5 links
                 ]
     """
+    # Acquire semaphore slot: blocks if MAX_CONCURRENT_CATALOG_PAGES limit reached.
+    # Ensures at most N Playwright browser tabs open simultaneously, preventing
+    # resource exhaustion and Cloudflare/OLX rate-limiting (HTTP 429 blocks).
+    # Automatically releases the slot when exiting the block (even on exception).
     async with semaphore:
         page = await context.new_page()
         try:
@@ -206,6 +210,9 @@ async def extract_data() -> list:
     """
     logger.info("Initializing Playwright (Extract phase)...")
 
+    # Context manager that ensures proper Playwright lifecycle: launches browser on entry,
+    # closes it on exit (even if an exception occurs). Prevents resource leaks and
+    # orphaned browser processes. All Playwright operations must occur within this block.
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(
