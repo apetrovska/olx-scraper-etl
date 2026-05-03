@@ -6,7 +6,7 @@ An asynchronous ETL pipeline that scrapes, cleans, and loads real estate listing
 ## Tech Stack
 | Layer | Tool | Purpose |
 |---|---|---|
-| **Extract** | `Playwright` | Browser automation for both catalog pages and individual ad pages |
+| **Extract** | `requests` + `BeautifulSoup` (catalog), `Playwright` (ads) | HTTP for listing pages, browser automation for individual ad pages |
 | **Transform** | `Pandas`, `re` | Data cleaning, regex parsing, missing value handling |
 | **Load** | `gspread`, `Google Sheets API` | Automated cloud upload |
 | **Concurrency** | `asyncio` | Parallel catalog and ad page fetches with semaphore-based load control |
@@ -19,7 +19,7 @@ olx_scraper_etl/
 ├── requirements.txt
 ├── service_account_creds.json   # Google service account key (git-ignored)
 └── src/
-    ├── scraper.py           # Extract phase: Playwright for catalog and ad pages
+    ├── scraper.py           # Extract phase: requests+BeautifulSoup for catalog, Playwright for ads
     ├── transformer.py       # Transform phase: cleaning, parsing, fallback logic
     ├── loader.py            # Load phase: Google Sheets upload
     ├── settings.py          # All configurable constants
@@ -29,22 +29,23 @@ olx_scraper_etl/
 
 ## Implementation Details
 
-### 1. Scraping Architecture
-**Catalog pages (Playwright):**
-- Async page loads to gather ad links
-- Limited by `MAX_CONCURRENT_CATALOG_PAGES` semaphore
+### 1. Hybrid Scraping Architecture
+**Catalog pages (requests + BeautifulSoup):**
+- Lightweight HTTP requests to fetch catalog pages
+- BeautifulSoup parses static HTML to extract ad links
+- Limited by `MAX_CONCURRENT_CATALOG_PAGES` semaphore, executed in thread pool via `asyncio.run_in_executor()`
 
 **Individual ads (Playwright):**
-- Async page loads for each ad to extract title, price, location, and full page text
-- Headless browser execution for JavaScript-enabled rendering
+- Async Playwright page loads for each ad to extract title, price, location, and full page text
+- Headless browser execution for JavaScript-enabled rendering and Cloudflare bypass
 - Concurrency controlled via `asyncio.Semaphore` (up to `MAX_CONCURRENT_TABS` concurrent tabs)
 
-**Result:** Consistent behavior, full JavaScript support, and unified async architecture.
+**Result:** Optimized extraction (lightweight catalog fetches, full-featured ad pages), resilient to bot detection, controlled concurrency.
 
 ### 2. Concurrency Control
 Two independent async semaphores manage concurrency:
-- **Catalog fetches:** `asyncio.Semaphore(MAX_CONCURRENT_CATALOG_PAGES)` — limits parallel catalog page loads
-- **Ad fetches:** `asyncio.Semaphore(MAX_CONCURRENT_TABS)` — limits parallel ad page loads
+- **Catalog fetches:** `asyncio.Semaphore(MAX_CONCURRENT_CATALOG_PAGES)` — limits parallel HTTP requests via thread pool executor
+- **Ad fetches:** `asyncio.Semaphore(MAX_CONCURRENT_TABS)` — limits parallel Playwright browser tabs
 
 This throttles request rate to avoid Cloudflare HTTP 429 blocks while maintaining high throughput. Both limits can be scaled up when a Proxy Pool is added.
 

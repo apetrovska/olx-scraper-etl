@@ -1,40 +1,33 @@
 import asyncio
 import logging
 import random
+import requests
+from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright, BrowserContext
 from src.settings import (
     URL, MAX_CONCURRENT_TABS, MAX_CONCURRENT_CATALOG_PAGES, ADS_PER_PAGE,
     VIEWPORT, USER_AGENT,
-    PAGE_LOAD_TIMEOUT, CATALOG_LOAD_TIMEOUT, SELECTOR_TIMEOUT, ELEMENT_TIMEOUT
+    PAGE_LOAD_TIMEOUT, CATALOG_LOAD_TIMEOUT, ELEMENT_TIMEOUT
 )
 
 logger = logging.getLogger(__name__)
 
 
-async def fetch_total_pages(page) -> int:
-    """Determines the total number of catalog pages from the pagination element.
-
-    Reads the ``aria-label`` attribute of the last
-    ``[data-testid="pagination-list-item"]`` element. OLX sets this attribute
-    to ``"Page N"``, where N is the last available page number.
-
-    Args:
-        page (playwright.async_api.Page): An already-loaded Playwright page
-            object pointing to the first catalog page.
-
-    Returns:
-        int: Total number of pages. Returns ``1`` if pagination is not found
-            or cannot be parsed.
-
-    Example:
-        Input:  page loaded at https://www.olx.ua/uk/nedvizhimost/kvartiry/kiev/
-                last pagination element has aria-label="Page 25"
-        Output: 25
-    """
+def _fetch_total_pages_sync() -> int:
+    """Synchronous helper: fetches catalog page and extracts total page count."""
     try:
-        last_item = page.locator('[data-testid="pagination-list-item"]').last
-        aria_label = await last_item.get_attribute('aria-label', timeout=SELECTOR_TIMEOUT)
-        # aria-label format is "Page 25"
+        headers = {"User-Agent": USER_AGENT}
+        response = requests.get(URL, headers=headers, timeout=CATALOG_LOAD_TIMEOUT / 1000)
+        response.raise_for_status()
+
+        soup = BeautifulSoup(response.content, 'html.parser')
+        last_pagination = soup.select('[data-testid="pagination-list-item"]')
+
+        if not last_pagination:
+            logger.warning("Pagination not found. Defaulting to 1 page.")
+            return 1
+
+        aria_label = last_pagination[-1].get('aria-label', '')
         total = int(aria_label.split()[-1])
         logger.info("Total catalog pages found: %d", total)
         return total
@@ -43,20 +36,73 @@ async def fetch_total_pages(page) -> int:
     return 1
 
 
-async def fetch_catalog_page(context: BrowserContext, page_num: int, semaphore: asyncio.Semaphore) -> list:
+async def fetch_total_pages() -> int:
+    """Determines the total number of catalog pages from the pagination element.
+
+    Fetches the first catalog page via HTTP (requests) and parses with BeautifulSoup.
+    Reads the ``aria-label`` attribute of the last ``[data-testid="pagination-list-item"]``
+    element. OLX sets this to ``"Page N"``, where N is the last available page number.
+
+    Executes synchronously in a thread pool to avoid blocking the event loop.
+
+    Returns:
+        int: Total number of pages. Returns ``1`` if pagination is not found
+            or cannot be parsed.
+
+    Example:
+        Input:  First catalog page fetched from https://www.olx.ua/uk/nedvizhimost/kvartiry/kiev/
+                last pagination element has aria-label="Page 25"
+        Output: 25
+    """
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _fetch_total_pages_sync)
+
+
+def _fetch_catalog_page_sync(page_num: int) -> list:
+    """Synchronous helper: fetches a single catalog page and extracts ad links."""
+    try:
+        current_url = URL if page_num == 1 else f"{URL}?page={page_num}"
+        logger.info("Loading catalog (page %d): %s", page_num, current_url)
+
+        headers = {"User-Agent": USER_AGENT}
+        response = requests.get(current_url, headers=headers, timeout=CATALOG_LOAD_TIMEOUT / 1000)
+        response.raise_for_status()
+
+        soup = BeautifulSoup(response.content, 'html.parser')
+        cards = soup.select('div[data-cy="l-card"]')
+
+        links = []
+        for card in cards[:ADS_PER_PAGE]:
+            link_elem = card.find('a')
+            if link_elem:
+                href = link_elem.get('href')
+                if href and href.startswith('/'):
+                    href = "https://www.olx.ua" + href
+                if href and href not in links:
+                    links.append(href)
+
+        logger.debug("Parsed %d links from page %d.", len(links), page_num)
+        return links
+
+    except Exception as e:
+        logger.error("Error loading catalog page %d: %s", page_num, e)
+        return []
+
+
+async def fetch_catalog_page(page_num: int, semaphore: asyncio.Semaphore) -> list:
     """Loads a single catalog page and returns a list of ad URLs.
 
-    Opens a new browser tab, navigates to the catalog page, waits for ad cards
-    to appear, then extracts up to ``ADS_PER_PAGE`` links. The tab is always
-    closed in the ``finally`` block, even on error.
+    Fetches the catalog page via HTTP (requests) and parses with BeautifulSoup.
+    Extracts up to ``ADS_PER_PAGE`` ad links from card elements.
+
+    Execution controlled by semaphore to limit concurrent requests and avoid
+    rate-limiting (HTTP 429) from OLX/Cloudflare.
 
     Args:
-        context (BrowserContext): Shared Playwright browser context used to
-            open new tabs.
         page_num (int): Catalog page number to load. Page 1 uses the base URL;
             pages 2+ append ``?page=N``.
-        semaphore (asyncio.Semaphore): Limits the number of catalog pages
-            opened simultaneously to avoid rate-limiting (HTTP 429).
+        semaphore (asyncio.Semaphore): Limits the number of concurrent catalog page
+            requests to ``MAX_CONCURRENT_CATALOG_PAGES``.
 
     Returns:
         list[str]: List of absolute ad URLs collected from this page.
@@ -70,40 +116,9 @@ async def fetch_catalog_page(context: BrowserContext, page_num: int, semaphore: 
                   ...  # up to 5 links
                 ]
     """
-    # Acquire semaphore slot: blocks if MAX_CONCURRENT_CATALOG_PAGES limit reached.
-    # Ensures at most N Playwright browser tabs open simultaneously, preventing
-    # resource exhaustion and Cloudflare/OLX rate-limiting (HTTP 429 blocks).
-    # Automatically releases the slot when exiting the block (even on exception).
     async with semaphore:
-        page = await context.new_page()
-        try:
-            # Page 1 uses the base URL, pages 2+ use the ?page=N parameter
-            current_url = URL if page_num == 1 else f"{URL}?page={page_num}"
-            logger.info("Loading catalog (page %d): %s", page_num, current_url)
-
-            await page.goto(current_url, wait_until="domcontentloaded", timeout=CATALOG_LOAD_TIMEOUT)
-            await page.wait_for_selector('div[data-cy="l-card"]', timeout=SELECTOR_TIMEOUT)
-            await asyncio.sleep(random.uniform(1, 3))
-
-            cards = await page.locator('div[data-cy="l-card"]').all()
-
-            links = []
-            for card in cards[:ADS_PER_PAGE]:
-                href = await card.locator('a').first.get_attribute('href')
-                if href and href.startswith('/'):
-                    href = "https://www.olx.ua" + href
-                if href and href not in links:
-                    links.append(href)
-
-            logger.debug("Parsed %d links from page %d.", len(links), page_num)
-            return links
-
-        except Exception as e:
-            logger.error("Error loading catalog page %d: %s", page_num, e)
-            return []
-
-        finally:
-            await page.close()
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _fetch_catalog_page_sync, page_num)
 
 
 async def process_single_ad(context: BrowserContext, link: str, semaphore: asyncio.Semaphore) -> dict | None:
@@ -190,10 +205,10 @@ async def extract_data() -> list:
     """Orchestrates the full Extract phase of the ETL pipeline.
 
     Workflow:
-        1. Load page 1 → read total page count from pagination.
-        2. Fetch all catalog pages in parallel (limited by ``MAX_CONCURRENT_CATALOG_PAGES``).
-        3. Flatten and deduplicate collected links.
-        4. Scrape all ad pages in parallel (limited by ``MAX_CONCURRENT_TABS``).
+        1. Determine total catalog pages via HTTP (requests + BeautifulSoup).
+        2. Fetch all catalog pages in parallel via HTTP (limited by ``MAX_CONCURRENT_CATALOG_PAGES``).
+        3. Flatten and deduplicate collected ad links.
+        4. Scrape all ad pages in parallel via Playwright (limited by ``MAX_CONCURRENT_TABS``).
         5. Filter out failed results (``None``).
 
     Returns:
@@ -216,11 +231,32 @@ async def extract_data() -> list:
         Input:  OLX catalog has 25 pages, ADS_PER_PAGE=5
         Output: up to 125 raw ad dicts (minus failed/None results)
     """
-    logger.info("Initializing Playwright (Extract phase)...")
+    logger.info("Initializing Extract phase...")
 
-    # Context manager that ensures proper Playwright lifecycle: launches browser on entry,
-    # closes it on exit (even if an exception occurs). Prevents resource leaks and
-    # orphaned browser processes. All Playwright operations must occur within this block.
+    # Determine total catalog pages (requests + BeautifulSoup)
+    total_pages = await fetch_total_pages()
+
+    logger.info("Starting parallel link collection from %d catalog pages...", total_pages)
+
+    # Collect links from all catalog pages in parallel
+    catalog_semaphore = asyncio.Semaphore(MAX_CONCURRENT_CATALOG_PAGES)
+    catalog_tasks = [
+        fetch_catalog_page(page_num, catalog_semaphore)
+        for page_num in range(1, total_pages + 1)
+    ]
+    all_ads_links = await asyncio.gather(*catalog_tasks)
+
+    # Flatten list of lists into a single list of links
+    all_links = []
+    for page_links in all_ads_links:
+        for link in page_links:
+            all_links.append(link)
+    links = list(dict.fromkeys(all_links))
+    duplicates = len(all_links) - len(links)
+    logger.debug("Total parsed: %d links, duplicates skipped: %d", len(all_links), duplicates)
+    logger.info("Found %d unique links. Launching Playwright for ad pages...", len(links))
+
+    # Initialize Playwright only for scraping individual ad pages
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(
@@ -228,40 +264,17 @@ async def extract_data() -> list:
             user_agent=USER_AGENT
         )
 
-        # Load page 1 to determine the total number of catalog pages
-        first_page = await context.new_page()
-        await first_page.goto(URL, wait_until="domcontentloaded", timeout=CATALOG_LOAD_TIMEOUT)
-        await first_page.wait_for_selector('div[data-cy="l-card"]', timeout=SELECTOR_TIMEOUT)
-        total_pages = await fetch_total_pages(first_page)
-        await first_page.close()
-
-        logger.info("Starting parallel link collection from %d catalog pages...", total_pages)
-
-        # Collect links from all catalog pages in parallel
-        # range(1, total_pages + 1): OLX pagination starts from 1
-        catalog_semaphore = asyncio.Semaphore(MAX_CONCURRENT_CATALOG_PAGES)
-        catalog_tasks = [
-            fetch_catalog_page(context, page_num, catalog_semaphore)
-            for page_num in range(1, total_pages + 1)
-        ]
-        all_ads_links = await asyncio.gather(*catalog_tasks)
-
-        # Flatten list of lists into a single list of links :)
-        all_links = []
-        for page_links in all_ads_links:
-            for link in page_links:
-                all_links.append(link)
-        links = list(dict.fromkeys(all_links))
-        duplicates = len(all_links) - len(links)
-        logger.debug("Total parsed: %d links, duplicates skipped: %d", len(all_links), duplicates)
-        logger.info("Found %d unique links. Launching %d parallel tasks... Parsing in progress", len(links), MAX_CONCURRENT_TABS)
-
-        # Process all ads in parallel using asyncio
+        # Process all ads in parallel using asyncio with Playwright
         ad_semaphore = asyncio.Semaphore(MAX_CONCURRENT_TABS)
         ad_tasks = [process_single_ad(context, link, ad_semaphore) for link in links]
         results = await asyncio.gather(*ad_tasks)
 
         await browser.close()
 
-        raw_data = [res for res in results if res is not None]
-        return raw_data
+    raw_data = []
+    for res in results:
+        # if res is not None:
+        raw_data.append(res)
+
+    logger.info("Extract phase complete. Collected %d valid ads.", len(raw_data))
+    return raw_data
