@@ -118,8 +118,8 @@ async def process_single_ad(context: BrowserContext, link: str, semaphore: async
         semaphore (asyncio.Semaphore): Limits concurrent ad page parsing.
 
     Returns:
-        dict | None: Dictionary with raw scraped fields, or ``None`` if a
-            critical error occurred.
+        dict: Dictionary with raw scraped fields. On critical error, returns dict with
+            ``title="ERROR"`` and error message in ``full_text`` for quality assessment.
     """
     async with semaphore:
         page = await context.new_page()
@@ -152,7 +152,7 @@ async def process_single_ad(context: BrowserContext, link: str, semaphore: async
                 img_locator = page.locator('img[alt="Location"]').first
                 if await img_locator.count() > 0:
                     parent_div = img_locator.locator('xpath=../..').first
-                    paragraphs = parent_div.locator('p').all()
+                    paragraphs = await parent_div.locator('p').all()
                     if paragraphs:
                         city_text = await paragraphs[0].inner_text()
                         if any(ch.isdigit() for ch in city_text) and len(paragraphs) > 1:
@@ -180,7 +180,15 @@ async def process_single_ad(context: BrowserContext, link: str, semaphore: async
 
         except Exception as e:
             logger.error("Critical error on page %s: %s", link, e)
-            return None
+            ad_id = link.split('-')[-1].replace('.html', '')
+            return {
+                "id": ad_id,
+                "title": "ERROR",
+                "raw_price": None,
+                "raw_location": "ERROR",
+                "url": link,
+                "full_text": str(e)
+            }
 
         finally:
             await page.close()
@@ -194,11 +202,11 @@ async def extract_data() -> list:
         2. Fetch all catalog pages in parallel (limited by ``MAX_CONCURRENT_CATALOG_PAGES``).
         3. Flatten and deduplicate collected links.
         4. Scrape all ad pages in parallel (limited by ``MAX_CONCURRENT_TABS``).
-        5. Filter out failed results (``None``).
+        5. Return all results (including errors marked with ``title="ERROR"``) for quality assessment.
 
     Returns:
-        list[dict]: List of raw ad dictionaries. Each item has the shape
-            returned by :func:`process_single_ad`. Failed ads are excluded::
+        list[dict]: List of raw ad dictionaries. Each item has the shape returned by
+            :func:`process_single_ad`. Failed ads included with ``title="ERROR"`` for quality assessment:
 
                 [
                     {
@@ -214,7 +222,7 @@ async def extract_data() -> list:
 
     Example:
         Input:  OLX catalog has 25 pages, ADS_PER_PAGE=5
-        Output: up to 125 raw ad dicts (minus failed/None results)
+        Output: up to 125 raw ad dicts (including error rows for quality assessment)
     """
     logger.info("Initializing Playwright (Extract phase)...")
 
@@ -263,5 +271,9 @@ async def extract_data() -> list:
 
         await browser.close()
 
-        raw_data = [res for res in results if res is not None]
+        raw_data = []
+        for res in results:
+            raw_data.append(res)
+
+        logger.info("Extract phase complete. Collected %d ads (including errors).", len(raw_data))
         return raw_data
