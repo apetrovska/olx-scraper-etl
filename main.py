@@ -13,8 +13,8 @@ async def main_pipeline():
     """Orchestrates the complete ETL pipeline: Extract, Transform, Load.
 
     Workflow:
-        1. **Extract:** Scrapes OLX catalog and individual ad pages via Playwright
-           and requests + BeautifulSoup. Returns raw data dictionaries.
+        1. **Extract:** Scrapes OLX catalog and individual ad pages via Playwright.
+           Returns raw data dictionaries.
         2. **Transform:** Cleans, parses, and validates the raw data. Applies
            fallback regex patterns for missing fields. Returns a Pandas DataFrame.
         3. **Load:** Uploads the clean DataFrame to a Google Spreadsheet.
@@ -25,7 +25,7 @@ async def main_pipeline():
 
     Side Effects:
         - Launches a Chromium browser (via Playwright)
-        - Makes HTTP requests to OLX
+        - Makes browser requests to OLX catalog and individual ad pages
         - Authenticates and uploads to Google Sheets
         - Logs all phases with DEBUG/INFO/ERROR levels
     """
