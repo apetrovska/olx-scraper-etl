@@ -51,11 +51,10 @@ This throttles request rate to avoid Cloudflare HTTP 429 blocks while maintainin
 ### 3. Graceful Degradation & Fallback
 If primary CSS/testid selectors fail to extract a field, a text-mining fallback activates: the full page body text is stored during scraping, and `transformer.py` uses regex patterns to recover price, area, floor, and location. Handles A/B design tests and dynamic CSS class names.
 
-### 4. Data Quality & Error Handling
-- **Failed parses included in output:** Ads with critical errors are marked with `title="ERROR"` and error message in `full_text`. This allows quality assessment of how many ads failed to parse.
-- **Prices stripped and cast to `float`**
-- **Currency extracted and stored in a separate column** (UAH / USD / EUR)
-- **Location parsed to city name only** (street addresses filtered out)
+### 4. Data Quality & Schema
+- Prices stripped and cast to `float`
+- Currency extracted and stored in a separate column (UAH / USD / EUR)
+- Location parsed to city name only (street addresses filtered out)
 
 ## Configuration
 
