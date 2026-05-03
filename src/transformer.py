@@ -95,12 +95,12 @@ def extract_fallback_data(item: dict) -> dict:
                    "raw_price": None,
                    "raw_location": "Unknown",
                    "title": "Not found",
-                   "full_text": "...МІСЦЕЗНАХОДЖЕННЯ\\nКиїв...35 000 $..."
+                   "full_text": "...МІСЦЕЗНАХОДЖЕННЯ\\nКиїв...35 000 $...Опубліковано\\nСучасна квартира..."
                }
         Output: {
                     "raw_price": "35 000 $",
                     "raw_location": "Київ",
-                    "title": "Not found",
+                    "title": "Сучасна квартира",
                     "full_text": "..."
                 }
     """
@@ -231,8 +231,8 @@ def transform_data(raw_data: list) -> pd.DataFrame:
         - Detects currency via :func:`extract_currency`.
         - Extracts city via :func:`extract_city`.
         - Strips query params from the ID.
-    Rows where ``Price`` is ``None`` (i.e. price could not be found even via
-    fallback) are dropped.
+    Rows with all fields are preserved; rows where ``Price`` is ``None``
+  remain in the DataFrame for quality assessment.
 
     Args:
         raw_data (list[dict]): List of raw ad dictionaries returned by

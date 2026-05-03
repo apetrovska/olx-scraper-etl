@@ -8,9 +8,9 @@ An asynchronous ETL pipeline that scrapes, cleans, and loads real estate listing
 |---|---|---|
 | **Extract** | `Playwright` | Browser automation for both catalog pages and individual ad pages |
 | **Transform** | `Pandas`, `re` | Data cleaning, regex parsing, missing value handling |
-| **Load** | `gspread`, Google Sheets API | Automated cloud upload |
+| **Load** | `gspread`, `Google Sheets API` | Automated cloud upload |
 | **Concurrency** | `asyncio` | Parallel catalog and ad page fetches with semaphore-based load control |
-| **Runtime** | Python 3.11+ | |
+| **Runtime** | `Python 3.11+` | |
 
 ## Project Structure
 ```
