@@ -70,6 +70,10 @@ async def fetch_catalog_page(context: BrowserContext, page_num: int, semaphore: 
                   ...  # up to 5 links
                 ]
     """
+    # Acquire semaphore slot: blocks if MAX_CONCURRENT_CATALOG_PAGES limit reached.
+    # Ensures at most N Playwright browser tabs open simultaneously, preventing
+    # resource exhaustion and Cloudflare/OLX rate-limiting (HTTP 429 blocks).
+    # Automatically releases the slot when exiting the block (even on exception).
     async with semaphore:
         page = await context.new_page()
         try:
@@ -91,7 +95,7 @@ async def fetch_catalog_page(context: BrowserContext, page_num: int, semaphore: 
                 if href and href not in links:
                     links.append(href)
 
-            logger.info("Parsed %d links from page %d.", len(links), page_num)
+            logger.debug("Parsed %d links from page %d.", len(links), page_num)
             return links
 
         except Exception as e:
@@ -102,83 +106,68 @@ async def fetch_catalog_page(context: BrowserContext, page_num: int, semaphore: 
             await page.close()
 
 
-async def process_single_ad(context: BrowserContext, link: str, semaphore: asyncio.Semaphore):
-    """Scrapes a single ad page and returns structured raw data.
+async def process_single_ad(context: BrowserContext, link: str, semaphore: asyncio.Semaphore) -> dict | None:
+    """Scrapes a single ad page using Playwright.
 
-    Opens a new browser tab, navigates to the ad URL, and extracts: title,
-    price, location, and full page text. Location is extracted using a
-    structural CSS anchor (``img[alt="Location"] + div p``); if the first
-    paragraph contains digits (street address), the second paragraph (region)
-    is used instead. The tab is always closed in the ``finally`` block.
+    Opens a new browser tab, loads the ad page, and extracts: title, price,
+    location, and full page text. Controlled by semaphore to limit concurrent tabs.
 
     Args:
-        context (BrowserContext): Shared Playwright browser context used to
-            open new tabs.
+        context (BrowserContext): Shared Playwright browser context.
         link (str): Absolute URL of the ad page to scrape.
-        semaphore (asyncio.Semaphore): Limits the number of ad pages open at
-            the same time to avoid Cloudflare/OLX rate-limiting.
+        semaphore (asyncio.Semaphore): Limits concurrent ad page parsing.
 
     Returns:
         dict | None: Dictionary with raw scraped fields, or ``None`` if a
-            critical error occurred::
-
-                {
-                    "id":           "123456789",          # ad ID from URL
-                    "title":        "2-кімнатна квартира",
-                    "raw_price":    "35 000 $",           # unparsed price string
-                    "raw_location": "Київ, Дарницький",   # unparsed location string
-                    "url":          "https://www.olx.ua/...",
-                    "full_text":    "..."                 # full body text for fallback
-                }
-
-    Example:
-        Input:  link="https://www.olx.ua/uk/.../prodazh-2k-kvartiry-ID123.html"
-        Output: {
-                    "id": "ID123",
-                    "title": "2-кімнатна квартира, 65 м²",
-                    "raw_price": "65 000 $",
-                    "raw_location": "Київ, Голосіївський",
-                    "url": "https://www.olx.ua/uk/.../prodazh-2k-kvartiry-ID123.html",
-                    "full_text": "2-кімнатна квартира..."
-                }
+            critical error occurred.
     """
     async with semaphore:
         page = await context.new_page()
         try:
             ad_id = link.split('-')[-1].replace('.html', '')
-            logger.info("Parsing adv: %s", ad_id)
+            logger.debug("Parsing adv: %s", ad_id)
 
             await page.goto(link, wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT)
             await asyncio.sleep(random.uniform(1, 3))
 
+            # Extract title from page title
+            title = "Not found"
             try:
                 raw_page_title = await page.title()
                 title = raw_page_title.split(' - ')[0].strip()
             except Exception:
-                title = "Not found"
+                pass
 
+            # Extract price from [data-testid="ad-price-container"] h3
+            raw_price = None
             try:
-                raw_price = await page.locator('[data-testid="ad-price-container"] h3').first.inner_text(timeout=ELEMENT_TIMEOUT)
+                price_locator = page.locator('[data-testid="ad-price-container"] h3').first
+                raw_price = await price_locator.inner_text(timeout=ELEMENT_TIMEOUT)
             except Exception:
-                raw_price = None
+                pass
 
+            # Extract location from img[alt="Location"] + div p
+            raw_location = "Unknown"
             try:
-                # Anchor: img[alt="Location"], next to which there is always a div with two <p>:
-                # p.nth(0) — city/district, p.nth(1) — region
-                loc_ps = page.locator('img[alt="Location"] + div p')
-                city_text = await loc_ps.nth(0).inner_text(timeout=ELEMENT_TIMEOUT)
-                if any(ch.isdigit() for ch in city_text):
-                    # p.nth(0) contains a street address with a number — use region from p.nth(1)
-                    raw_location = await loc_ps.nth(1).inner_text(timeout=ELEMENT_TIMEOUT)
-                else:
-                    raw_location = city_text
+                img_locator = page.locator('img[alt="Location"]').first
+                if await img_locator.count() > 0:
+                    parent_div = img_locator.locator('xpath=../..').first
+                    paragraphs = parent_div.locator('p').all()
+                    if paragraphs:
+                        city_text = await paragraphs[0].inner_text()
+                        if any(ch.isdigit() for ch in city_text) and len(paragraphs) > 1:
+                            raw_location = await paragraphs[1].inner_text()
+                        else:
+                            raw_location = city_text
             except Exception:
-                raw_location = "Unknown"
+                pass
 
+            # Extract full body text
+            full_page_text = ""
             try:
                 full_page_text = await page.locator('body').inner_text(timeout=ELEMENT_TIMEOUT)
             except Exception:
-                full_page_text = ""
+                pass
 
             return {
                 "id": ad_id,
@@ -229,6 +218,9 @@ async def extract_data() -> list:
     """
     logger.info("Initializing Playwright (Extract phase)...")
 
+    # Context manager that ensures proper Playwright lifecycle: launches browser on entry,
+    # closes it on exit (even if an exception occurs). Prevents resource leaks and
+    # orphaned browser processes. All Playwright operations must occur within this block.
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(
@@ -262,12 +254,12 @@ async def extract_data() -> list:
         links = list(dict.fromkeys(all_links))
         duplicates = len(all_links) - len(links)
         logger.debug("Total parsed: %d links, duplicates skipped: %d", len(all_links), duplicates)
-        logger.info("Found %d unique links. Launching %d parallel threads...", len(links), MAX_CONCURRENT_TABS)
+        logger.info("Found %d unique links. Launching %d parallel tasks... Parsing in progress", len(links), MAX_CONCURRENT_TABS)
 
-        # Process all ads in parallel
+        # Process all ads in parallel using asyncio
         ad_semaphore = asyncio.Semaphore(MAX_CONCURRENT_TABS)
-        tasks = [process_single_ad(context, link, ad_semaphore) for link in links]
-        results = await asyncio.gather(*tasks)
+        ad_tasks = [process_single_ad(context, link, ad_semaphore) for link in links]
+        results = await asyncio.gather(*ad_tasks)
 
         await browser.close()
 
