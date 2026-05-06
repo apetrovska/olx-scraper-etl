@@ -83,6 +83,10 @@ async def fetch_catalog_page(context: BrowserContext, page_num: int, semaphore: 
 
             await page.goto(current_url, wait_until="domcontentloaded", timeout=CATALOG_LOAD_TIMEOUT)
             await page.wait_for_selector('div[data-cy="l-card"]', timeout=SELECTOR_TIMEOUT)
+            # OR alternative implementation to make sure all ad cards have loaded before .all():
+            # await expect(page.locator('div[data-cy="l-card"]').to_have_count(ADS_PER_PAGE, timeout=SELECTOR+TIMEOUT))
+
+            # Imitate human behavior of random micro-pausing instead of instant reading ad cards
             await asyncio.sleep(random.uniform(1, 3))
 
             cards = await page.locator('div[data-cy="l-card"]').all()
@@ -118,13 +122,14 @@ async def process_single_ad(context: BrowserContext, link: str, semaphore: async
         semaphore (asyncio.Semaphore): Limits concurrent ad page parsing.
 
     Returns:
-        dict | None: Dictionary with raw scraped fields, or ``None`` if a
-            critical error occurred.
+        dict | None: Dictionary with raw scraped fields. The ``"id"`` field
+            is cleaned of query parameters (e.g. ``?search_reason=...``).
+            Returns ``None`` if a critical error occurred.
     """
     async with semaphore:
         page = await context.new_page()
         try:
-            ad_id = link.split('-')[-1].replace('.html', '')
+            ad_id = link.split('-')[-1].replace('.html', '').split('?')[0]
             logger.debug("Parsing adv: %s", ad_id)
 
             await page.goto(link, wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT)
@@ -229,9 +234,10 @@ async def extract_data() -> list:
         )
 
         # Load page 1 to determine the total number of catalog pages
+        # Wait for pagination element to appear before extracting page count
         first_page = await context.new_page()
         await first_page.goto(URL, wait_until="domcontentloaded", timeout=CATALOG_LOAD_TIMEOUT)
-        await first_page.wait_for_selector('div[data-cy="l-card"]', timeout=SELECTOR_TIMEOUT)
+        await first_page.wait_for_selector('[data-testid="pagination-list-item"]', timeout=SELECTOR_TIMEOUT)
         total_pages = await fetch_total_pages(first_page)
         await first_page.close()
 
@@ -251,7 +257,10 @@ async def extract_data() -> list:
         for page_links in all_ads_links:
             for link in page_links:
                 all_links.append(link)
+
+        # Create a list of unique links through casting initial list to dict keys
         links = list(dict.fromkeys(all_links))
+        # Find duplicates
         duplicates = len(all_links) - len(links)
         logger.debug("Total parsed: %d links, duplicates skipped: %d", len(all_links), duplicates)
         logger.info("Found %d unique links. Launching %d parallel tasks... Parsing in progress", len(links), MAX_CONCURRENT_TABS)

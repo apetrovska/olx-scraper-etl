@@ -230,7 +230,6 @@ def transform_data(raw_data: list) -> pd.DataFrame:
         - Cleans price via :func:`clean_price`.
         - Detects currency via :func:`extract_currency`.
         - Extracts city via :func:`extract_city`.
-        - Strips query params from the ID.
     Rows with all fields are preserved; rows where ``Price`` is ``None``
   remain in the DataFrame for quality assessment.
 
@@ -275,8 +274,7 @@ def transform_data(raw_data: list) -> pd.DataFrame:
         # Parse area and floors from page text
         params = extract_parameters(item.get("full_text", ""))
 
-        # Strip extra query params from ID (e.g. ?search_reason=...)
-        clean_id = str(item.get("id", "")).split('?')[0]
+        clean_id = item.get("id", "")
 
         cleaned_item = {
             "ID": clean_id,
