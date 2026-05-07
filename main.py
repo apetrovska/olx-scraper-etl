@@ -52,5 +52,9 @@ async def main_pipeline():
 
 
 if __name__ == "__main__":
+
+    # Initialize logger before the pipeline starts
     setup_logging()
+
+    # Create event loop, start coroutine main_pipeline() within event loop, wait till finish and close event loop
     asyncio.run(main_pipeline())

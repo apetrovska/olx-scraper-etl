@@ -31,8 +31,11 @@ def clean_price(price_text: str) -> float | None:
     if not price_text: return None
     try:
         text = price_text.lower().replace('грн.', '').replace('грн', '').replace('$', '').replace('€', '')
+        # replace non-breaking space (often used for formatting numbers on the web pages)
         text = text.replace(' ', '').replace('\xa0', '')
+        # replace everything that is not a digit/dot/comma
         text = re.sub(r'[^\d.,]', '', text)
+        # converting all decimal values to use "." as a delimiter instead of "," and stripping occasional dots from both ends
         text = text.replace(',', '.').strip('.')
         if text: return float(text)
         return None
@@ -60,10 +63,10 @@ def extract_currency(price_text: str) -> str:
         Output: "UAH"
 
         Input:  None
-        Output: "UAH"
+        Output: "Unknown"
     """
     if not price_text:
-        return "UAH"  # default value
+        return "Unknown"  # default value
 
     text = price_text.lower()
     if '$' in text or 'долар' in text:

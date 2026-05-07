@@ -129,10 +129,12 @@ async def process_single_ad(context: BrowserContext, link: str, semaphore: async
     async with semaphore:
         page = await context.new_page()
         try:
+            # Extract clean ad ID from ad link
             ad_id = link.split('-')[-1].replace('.html', '').split('?')[0]
             logger.debug("Parsing adv: %s", ad_id)
 
             await page.goto(link, wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT)
+            # Pause here imitates human behavior and replaces multiple wait_for_selector's to simplify ensuring specific elements load
             await asyncio.sleep(random.uniform(1, 3))
 
             # Extract title from page title

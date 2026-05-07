@@ -55,7 +55,8 @@ def load_to_sheets(df: pd.DataFrame, sheet_name: str = SHEET_NAME) -> None:
         # First row contains column headers
         data_to_upload = [df.columns.values.tolist()] + df.values.tolist()
 
-        # Load all data in a single request (much faster than row by row)
+        # Load all data in a single request
+        # (much faster than row by row and more efficient given the requests limits from Google Sheets API)
         sheet.update(range_name="A1", values=data_to_upload)
 
         logger.info("%d rows uploaded to Google Sheet '%s'.", len(df), sheet_name)
